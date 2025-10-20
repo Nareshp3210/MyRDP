@@ -13,7 +13,7 @@ jobs:
         run: |
           Write-Host "=== Configuring Remote Desktop Settings ==="
 
-          # Ensure registry keys exist before modifying
+          # Ensure registry keys exist
           if (-not (Test-Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server')) {
               New-Item -Path 'HKLM:\System\CurrentControlSet\Control' -Name 'Terminal Server' | Out-Null
           }
@@ -21,7 +21,7 @@ jobs:
               New-Item -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations' -Name 'RDP-Tcp' | Out-Null
           }
 
-          # Enable RDP and disable NLA
+          # Enable RDP and disable NLA completely
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                            -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
@@ -29,13 +29,30 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "SecurityLayer" -Value 0 -Force
 
-          # Enable Remote Desktop firewall rule
+          # Allow Remote Desktop in Windows Firewall
+          Write-Host "Configuring Firewall for RDP..."
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-          # Restart RDP service
-          Restart-Service -Name TermService -Force
-          Write-Host "RDP successfully enabled and firewall configured."
+          # Restart Remote Desktop service cleanly
+          Write-Host "Restarting Remote Desktop Service..."
+          Stop-Service -Name TermService -Force
+          Start-Service -Name TermService
+          Write-Host "RDP Service restarted successfully."
+
+          # Verify RDP port status
+          Write-Host "Verifying RDP service and port 3389..."
+          $serviceStatus = (Get-Service -Name TermService).Status
+          Write-Host "TermService status: $serviceStatus"
+          netstat -ano | findstr 3389
+
+          if ($serviceStatus -ne "Running") {
+              Write-Error "RDP service is not running!"
+              exit 1
+          }
+
+          Write-Host "RDP configured and verified."
 
       - name: Create RDP User with Secure Password
         run: |
@@ -44,11 +61,11 @@ jobs:
           Add-Type -AssemblyName System.Security
 
           $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
+              Upper   = [char[]](65..90)
+              Lower   = [char[]](97..122)
+              Number  = [char[]](48..57)
               Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
+                         [char[]](91..96) + [char[]](123..126))
           }
 
           $rawPassword = @()
@@ -73,7 +90,8 @@ jobs:
               Write-Error "User creation failed"
               exit 1
           }
-          Write-Host "User RDP created successfully."
+
+          Write-Host "RDP user created successfully."
 
       - name: Install Tailscale
         run: |
@@ -84,6 +102,7 @@ jobs:
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
+
           Write-Host "Tailscale installation completed."
 
       - name: Establish Tailscale Connection
@@ -91,7 +110,7 @@ jobs:
           Write-Host "=== Connecting to Tailscale ==="
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
 
-          # Wait for Tailscale IP
+          # Wait for Tailscale IP assignment
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -110,24 +129,24 @@ jobs:
 
       - name: Verify RDP Accessibility
         run: |
-          Write-Host "=== Verifying RDP Connection ==="
+          Write-Host "=== Verifying RDP Port ==="
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
+              Write-Error "TCP connection to port 3389 failed!"
               exit 1
           }
-          Write-Host "RDP port 3389 is reachable via Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "✅ RDP port 3389 is open and reachable."
 
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Address: $env:TAILSCALE_IP:3389"
           Write-Host "Username: RDP"
           Write-Host "Password: $(echo $env:RDP_CREDS)"
           Write-Host "==================`n"
 
-          # Keep workflow alive
+          # Keep session alive for MSTSC
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Write-Host "[$(Get-Date)] RDP Active - Keep workflow running."
               Start-Sleep -Seconds 300
           }
